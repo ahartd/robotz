@@ -28,7 +28,7 @@ safety:
   max_height_m: 0.12
 
 pointing:
-  gemini_model: gemini-robotics-er-1.5-preview   # used by locate() if GEMINI_API_KEY is set
+  gemini_model: gemini-robotics-er-2-preview   # used by locate() if GEMINI_API_KEY is set (in .env)
 
 agent:
   model: claude-sonnet-5-5

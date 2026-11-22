@@ -23,7 +23,7 @@ Use the Python environment where LeRobot already runs your arm:
 ```bash
 cd so101-agent
 pip install -r requirements.txt
-python -m pytest tests -q      # simulated arm and camera, no hardware: "12 passed"
+python -m pytest tests -q      # simulated arm and camera, no hardware: "13 passed"
 ```
 
 ## 2. Configure
@@ -32,6 +32,17 @@ Edit `config.yaml`:
 - `robot.port`: the follower's port, from `lerobot-find-port`.
 - `robot.id`: the id you used with `lerobot-calibrate`.
 - `camera.index`: the overhead camera, from `lerobot-find-cameras opencv`.
+
+Then put your API keys in a `.env` file. It's gitignored, so the keys never end up in the repo:
+
+```bash
+cp .env.example .env    # then paste your keys into .env
+```
+
+- `ANTHROPIC_API_KEY`: needed for the terminal agent (`agent.py`). The Claude desktop app doesn't need it.
+- `GEMINI_API_KEY`: optional. It turns on `locate()` for precise object pointing with Gemini Robotics-ER.
+
+Keys you `export` in your shell take priority over `.env`.
 
 ## 3. Markers
 
@@ -68,8 +79,9 @@ If the tip is more than about 5 mm off the centers, run `calibrate.py` again.
 
 ## 5. Use it from the terminal
 
+With `ANTHROPIC_API_KEY` in `.env`:
+
 ```bash
-export ANTHROPIC_API_KEY=sk-ant-...
 python agent.py
 you> pick up the red block and put it next to the blue one
 ```
@@ -84,14 +96,14 @@ Add the server to the app's local MCP server config, `claude_desktop_config.json
   "mcpServers": {
     "so101-arm": {
       "command": "/full/path/to/python",
-      "args": ["/full/path/to/so101-agent/server.py"],
-      "env": { "GEMINI_API_KEY": "optional, enables locate()" }
+      "args": ["/full/path/to/so101-agent/server.py"]
     }
   }
 }
 ```
 
-Restart the app, then try "Look at the table and pick up the red block."
+The server reads `GEMINI_API_KEY` from `.env` itself. Restart the app, then try "Look at the
+table and pick up the red block."
 
 ## How it works
 
