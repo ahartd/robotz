@@ -145,20 +145,18 @@ def test_endpointer_gives_up_if_nobody_speaks():
     assert "timeout" in results and "done" not in results
 
 
-def test_reads_extensible_wav(tmp_path):
-    from so101_agent.voice import read_wav_int16
+def test_say_device_listing_is_parsed():
+    from so101_agent.voice import parse_say_devices
 
-    samples = (np.arange(100) * 100).astype(np.int16)
-    body = (b"WAVE" + b"fmt " + (40).to_bytes(4, "little") + (0xFFFE).to_bytes(2, "little") + bytes(38)
-            + b"data" + len(samples.tobytes()).to_bytes(4, "little") + samples.tobytes())
-    (tmp_path / "x.wav").write_bytes(b"RIFF" + len(body).to_bytes(4, "little") + body)
-    assert np.array_equal(read_wav_int16(tmp_path / "x.wav"), samples)
+    listing = "   57 MacBook Pro Speakers\n   91 reSpeaker XVF3800 4-Mic Array\nnot a device line\n"
+    assert parse_say_devices(listing) == {"MacBook Pro Speakers": "57", "reSpeaker XVF3800 4-Mic Array": "91"}
 
 
 def test_normalize_and_tone():
     assert normalize("  Stop!! ") == "stop"
     t = tone([440, 880])
     assert t.dtype == np.int16 and len(t) == int(16000 * 0.12) * 2
+    assert len(tone([440], rate=48000)) == int(48000 * 0.12)
 
 
 # --------------------------------------------------------------------------- stopping the arm
@@ -236,3 +234,48 @@ def test_agent_cancel_ends_the_request_cleanly(tmp_path, monkeypatch):
 
 async def _final_text(**kw):
     return SimpleNamespace(content=[SimpleNamespace(type="text", text="Hi!")], stop_reason="end_turn")
+
+
+def test_speaker_sends_speech_straight_from_say_to_the_device(tmp_path, monkeypatch):
+    import os
+    import stat
+    import time as _time
+
+    from so101_agent import voice
+
+    devices = [
+        {"name": "MacBook Pro Microphone", "max_input_channels": 1, "max_output_channels": 0, "default_samplerate": 48000.0},
+        {"name": "reSpeaker XVF3800 4-Mic Array", "max_input_channels": 2, "max_output_channels": 2, "default_samplerate": 16000.0},
+        {"name": "MacBook Pro Speakers", "max_input_channels": 0, "max_output_channels": 2, "default_samplerate": 48000.0},
+    ]
+    played = []
+    fake_sd = SimpleNamespace(
+        query_devices=lambda index=None, kind=None: devices if index is None else devices[index],
+        play=lambda data, rate, device=None, latency=None: played.append((data.shape, rate, device, latency)),
+        stop=lambda: None,
+    )
+    monkeypatch.setitem(sys.modules, "sounddevice", fake_sd)
+    log = tmp_path / "say.log"
+    say = tmp_path / "say"
+    say.write_text('#!/bin/sh\nif [ "$1" = "-a" ] && [ "$2" = "?" ]; then\n'
+                   '  echo "   57 MacBook Pro Speakers"; echo "   91 reSpeaker XVF3800 4-Mic Array"; exit 0; fi\n'
+                   f'echo "$@" >> {log}; cat >> {log}; sleep 0.3\n')
+    say.chmod(say.stat().st_mode | stat.S_IEXEC)
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+
+    sp = voice.Speaker(VoiceCfg())  # auto: the XVF3800
+    assert sp.name.startswith("reSpeaker") and sp.echo_cancelled and sp.say_device == "91"
+    sp.say("Hello there.")
+    assert sp.busy
+    sp._proc.wait()
+    assert not sp.busy
+    assert log.read_text().splitlines() == ["-a 91", "Hello there."]
+    sp.chime("wake")
+    assert played[-1] == ((int(16000 * 0.12) * 2, 2), 16000, 1, "high")  # stereo, device's own rate
+
+    mac = voice.Speaker(VoiceCfg(output_device="MacBook"))
+    assert mac.say_device == "57" and mac.rate == 48000 and not mac.echo_cancelled
+    mac.say("Stop me.")
+    mac.stop()
+    _time.sleep(0.05)
+    assert not mac.busy

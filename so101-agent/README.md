@@ -25,7 +25,7 @@ Use the Python environment where LeRobot already runs your arm:
 ```bash
 cd so101-agent
 pip install -r requirements.txt
-python -m pytest tests -q      # simulated arm and camera, no hardware: "22 passed"
+python -m pytest tests -q      # simulated arm and camera, no hardware: "23 passed"
 ```
 
 ## 2. Configure
@@ -135,8 +135,10 @@ Everything except Claude runs on your Mac: wake word (openWakeWord), speech-to-t
    input and output. `voice.py` finds it automatically and records the speech-recognition channel.
 4. **Allow microphone access.** macOS asks the first time your terminal app uses the mic. Allow it.
 
-`python voice.py --type` lets you type commands but hear spoken replies, which is handy for
-checking the speaker.
+Two checks if something sounds off:
+- `python voice.py --test-audio` speaks a test phrase, records 4 seconds from the mic, reports
+  dropouts and level, shows what it understood, and plays the recording back.
+- `python voice.py --type` lets you type commands but hear spoken replies.
 
 ### Voice settings (optional)
 
@@ -187,6 +189,7 @@ voice:
 | Says "MISSED" on thin objects | Lower `motion.holding_margin` |
 | Image upside down | `camera.rotate_180: true` |
 | Arm too fast | Lower `motion.max_joint_speed_deg_s` |
+| Voice crackles, or commands get misheard | `python voice.py --test-audio` |
 
 ## Later: wrist camera
 
