@@ -3,6 +3,7 @@
     python voice.py                 # listen on the XVF3800 and answer out loud
     python voice.py --list-devices  # see microphones and speakers
     python voice.py --type          # type commands but hear spoken replies (tests the speaker)
+    python voice.py --test-audio    # check the speaker and mic: plays a phrase, records 4 s
 
 Saying the wake word while the arm is moving stops it immediately. Needs ANTHROPIC_API_KEY
 (in .env). Settings are in the `voice:` section of config.yaml (see the README).
@@ -22,6 +23,7 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--list-devices", action="store_true", help="list audio devices and exit")
     p.add_argument("--type", action="store_true", help="type commands instead of speaking them")
+    p.add_argument("--test-audio", action="store_true", help="check the speaker and microphone, then exit")
     a = p.parse_args()
 
     logging.basicConfig(level=logging.WARNING, stream=sys.stderr)
@@ -29,6 +31,11 @@ def main() -> None:
 
     if a.list_devices:
         print(voice.list_devices())
+        return
+    if a.test_audio:
+        from so101_agent.config import load_config
+
+        voice.audio_check(load_config())
         return
 
     import asyncio

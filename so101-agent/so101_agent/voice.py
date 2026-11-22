@@ -15,11 +15,8 @@ import re
 import shutil
 import subprocess
 import sys
-import tempfile
 import threading
 import time
-import wave
-from pathlib import Path
 
 import numpy as np
 
@@ -95,14 +92,16 @@ class Microphone:
         self.channel = min(cfg.input_channel if is_xvf else 0, self.channels - 1)
         self.is_xvf = is_xvf
         self.frames: queue.Queue[np.ndarray] = queue.Queue()
+        self.dropped = 0
+        self._warned_at = 0
         self._stream = sd.InputStream(
             samplerate=RATE, blocksize=FRAME, device=self.device, channels=self.channels,
             dtype="int16", callback=self._callback,
         )
 
     def _callback(self, indata, n, t, status):
-        if status:
-            log.debug("audio input: %s", status)
+        if status.input_overflow:
+            self.dropped += 1
         self.frames.put(indata[:, self.channel].copy())
 
     def __enter__(self):
@@ -114,6 +113,9 @@ class Microphone:
         self._stream.close()
 
     def read(self, timeout: float = 1.0) -> np.ndarray | None:
+        if self.dropped > self._warned_at:
+            self._warned_at = self.dropped
+            print(f"(mic audio dropped {self.dropped}x: the computer couldn't keep up)", file=sys.stderr, flush=True)
         try:
             return self.frames.get(timeout=timeout)
         except queue.Empty:
@@ -121,17 +123,31 @@ class Microphone:
 
 
 # --------------------------------------------------------------------------- output
-def tone(freqs: list[float], dur: float = 0.12, volume: float = 0.25) -> np.ndarray:
+def tone(freqs: list[float], dur: float = 0.12, volume: float = 0.25, rate: int = RATE) -> np.ndarray:
     parts = []
     for f in freqs:
-        t = np.arange(int(RATE * dur)) / RATE
+        t = np.arange(int(rate * dur)) / rate
         env = np.minimum(1, np.minimum(t, dur - t) / 0.01)  # 10 ms fade in/out
         parts.append(np.sin(2 * np.pi * f * t) * env * volume)
     return (np.concatenate(parts) * 32767).astype(np.int16)
 
 
+def parse_say_devices(listing: str) -> dict[str, str]:
+    """`say -a '?'` output ("  57 MacBook Pro Speakers") -> {name: id}."""
+    out = {}
+    for line in listing.splitlines():
+        m = re.match(r"\s*(\d+)\s+(.+?)\s*$", line)
+        if m:
+            out[m.group(2)] = m.group(1)
+    return out
+
+
 class Speaker:
-    """Plays chimes and speech (macOS `say`) on the output device, without blocking."""
+    """Speaks with macOS `say` and plays chimes, on the chosen output device, without blocking.
+
+    Speech goes straight from `say` to the device, so no audio passes through Python: that keeps
+    it smooth even while the wake-word model and the arm are busy.
+    """
 
     def __init__(self, cfg: VoiceCfg):
         import sounddevice as sd
@@ -140,6 +156,7 @@ class Speaker:
         self.device = find_device(cfg.output_device, "output")
         info = sd.query_devices(self.device, "output")
         self.name = info["name"]
+        self.rate = int(info["default_samplerate"] or 48000)  # play chimes at the device's own rate
         self.channels = min(2, int(info["max_output_channels"]))
         self.echo_cancelled = any(n in self.name.lower() for n in XVF_NAMES)
         self.voice = cfg.say_voice
@@ -148,19 +165,39 @@ class Speaker:
         if tts == "auto":
             tts = "say" if shutil.which("say") else "none"
         self.tts = tts
+        self.say_device = self._find_say_device() if tts == "say" and self.device is not None else None
+        self._proc: subprocess.Popen | None = None
         self._until = 0.0
+
+    def _find_say_device(self) -> str | None:
+        try:
+            listing = subprocess.run(["say", "-a", "?"], capture_output=True, text=True, timeout=10).stdout
+        except (OSError, subprocess.SubprocessError):
+            return None
+        devices = parse_say_devices(listing)
+        if self.name in devices:
+            return devices[self.name]
+        for name, dev_id in devices.items():
+            if name.startswith(self.name) or self.name.startswith(name):
+                return dev_id
+        print(f"Note: `say` doesn't list {self.name!r}; speech will use the default output.", flush=True)
+        return None
 
     @property
     def busy(self) -> bool:
-        return time.monotonic() < self._until
+        talking = self._proc is not None and self._proc.poll() is None
+        return talking or time.monotonic() < self._until
 
-    def play(self, samples: np.ndarray) -> None:
+    def play(self, samples: np.ndarray, rate: int) -> None:
         if self.channels > 1:  # same sound on both sides; the echo canceller listens to the left one
             samples = np.column_stack([samples] * self.channels)
-        self.sd.play(samples, RATE, device=self.device)
-        self._until = time.monotonic() + len(samples) / RATE + 0.1
+        self.sd.play(samples, rate, device=self.device, latency="high")
+        self._until = time.monotonic() + len(samples) / rate + 0.1
 
     def stop(self) -> None:
+        if self._proc is not None and self._proc.poll() is None:
+            self._proc.terminate()
+        self._proc = None
         self.sd.stop()
         self._until = 0.0
 
@@ -168,38 +205,24 @@ class Speaker:
         if not self.chimes:
             return
         notes = {"wake": [660, 990], "thinking": [520], "error": [440, 330], "stop": [880, 440]}[kind]
-        self.play(tone(notes))
+        self.play(tone(notes, rate=self.rate), self.rate)
 
-    def say(self, text: str) -> None:
+    def say(self, text: str, wait: bool = False) -> None:
         print(f"arm: {text}", flush=True)
         if self.tts != "say" or not text:
             return
-        with tempfile.TemporaryDirectory() as d:
-            path = Path(d) / "reply.wav"
-            cmd = ["say", "-o", str(path), "--file-format=WAVE", f"--data-format=LEI16@{RATE}"]
-            if self.voice:
-                cmd += ["-v", self.voice]
-            subprocess.run(cmd, input=text, text=True, check=True, capture_output=True)  # text via stdin
-            audio = read_wav_int16(path)
-        self.play(audio)
-
-
-def read_wav_int16(path) -> np.ndarray:
-    """16-bit mono samples from a WAV file, including the WAVE_FORMAT_EXTENSIBLE kind that
-    older Python `wave` modules refuse."""
-    data = Path(path).read_bytes()
-    try:
-        with wave.open(str(path)) as w:
-            return np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16)
-    except wave.Error:
-        pass
-    pos = 12  # skip "RIFF" <size> "WAVE"
-    while pos + 8 <= len(data):
-        cid, size = data[pos:pos + 4], int.from_bytes(data[pos + 4:pos + 8], "little")
-        if cid == b"data":
-            return np.frombuffer(data[pos + 8:pos + 8 + size], dtype=np.int16)
-        pos += 8 + size + (size & 1)
-    raise ValueError(f"no audio in {path}")
+        self.stop()
+        cmd = ["say"]
+        if self.voice:
+            cmd += ["-v", self.voice]
+        if self.say_device:
+            cmd += ["-a", self.say_device]
+        self._proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                                      stderr=subprocess.DEVNULL, text=True)
+        self._proc.stdin.write(text)  # text via stdin, so nothing in it is read as an option
+        self._proc.stdin.close()
+        if wait:
+            self._proc.wait()
 
 
 # --------------------------------------------------------------------------- recognition
@@ -420,6 +443,51 @@ class VoiceLoop:
                 self.step(np.zeros(FRAME, np.int16))  # keep the state machine moving
 
 
+def audio_check(cfg) -> None:
+    """Speak a test phrase, record a few seconds, and report what the mic heard."""
+    import wave
+
+    v = cfg.voice
+    speaker = Speaker(v)
+    where = "" if speaker.say_device or speaker.device is None else " (but `say` will use the default output)"
+    print(f"Speaker: {speaker.name}, {speaker.rate} Hz{where}", flush=True)
+    speaker.chime("wake")
+    time.sleep(0.5)
+    speaker.say("This is the robot's voice. It should sound clear, with no crackle.", wait=True)
+
+    mic = Microphone(v)
+    print(f"Mic: {mic.name}, channel {mic.channel} of {mic.channels}", flush=True)
+    print('Recording for 4 seconds. Say "pick up the red block" now...', flush=True)
+    frames = []
+    with mic:
+        end = time.monotonic() + 4.0
+        while time.monotonic() < end:
+            f = mic.read(timeout=1.0)
+            if f is not None:
+                frames.append(f)
+    audio = np.concatenate(frames) if frames else np.zeros(0, np.int16)
+    seconds = len(audio) / RATE
+    peak = int(np.abs(audio.astype(np.int32)).max()) if len(audio) else 0
+    with wave.open("mic_test.wav", "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(RATE)
+        w.writeframes(audio.tobytes())
+    print(f"Got {seconds:.1f} s of audio (expected about 4.0), {mic.dropped} dropouts, "
+          f"peak level {peak} of 32767. Saved mic_test.wav.", flush=True)
+    print("Transcribing...", flush=True)
+    print(f"Heard: {Transcriber(v)(audio)!r}", flush=True)
+    if seconds < 3.6 or mic.dropped:
+        print("-> The mic stream is losing audio, which makes recognition choppy.")
+    if peak < 1500:
+        print("-> Very quiet. Is the right mic selected, and is microphone access allowed for your terminal?")
+    elif peak >= 32000:
+        print("-> Too loud (clipping). Move back a little.")
+    if shutil.which("afplay"):
+        print("Playing the recording back on your default output...", flush=True)
+        subprocess.run(["afplay", "mic_test.wav"])
+
+
 def main(cfg, agent) -> None:
     """Wire up the real microphone, models and speaker, then listen forever."""
     v = cfg.voice
@@ -431,13 +499,14 @@ def main(cfg, agent) -> None:
         print(f"Mic: {mic.name} (channel {mic.channel})   Speaker: {speaker.name}", flush=True)
         if not mic.is_xvf:
             print("Note: the XVF3800 wasn't found, using the default mic.", flush=True)
-        if not speaker.echo_cancelled:
-            print("Note: replies aren't going through the XVF3800, so it can't cancel their echo. "
-                  "You can't interrupt while it's talking.", flush=True)
+        echo_cancelled = speaker.echo_cancelled and mic.is_xvf  # needs both: XVF mic and XVF playback
+        if not echo_cancelled:
+            print("Note: echo cancellation needs both the mic and the speaker on the XVF3800, so you "
+                  "can't interrupt while it's talking.", flush=True)
         words = v.wake_word.replace("_", " ").removesuffix(".onnx")
         print(f'Say "{words}", then a command. Say "{words}" again to stop the arm. Ctrl-C to quit.', flush=True)
         loop = VoiceLoop(v, mic.read, wake, Endpointer(v), transcribe, speaker, AgentRunner(agent),
-                         echo_cancelled=speaker.echo_cancelled)
+                         echo_cancelled=echo_cancelled)
         try:
             loop.run()
         except KeyboardInterrupt:
