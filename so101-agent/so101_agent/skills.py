@@ -88,6 +88,16 @@ class Skills:
             self._wrist = Camera(c.wrist_index, c.width, c.height)
         return self._wrist
 
+    def request_stop(self) -> None:
+        """Freeze the arm immediately, even mid-move. Deliberately doesn't take the lock:
+        a move in progress holds it."""
+        if self._arm is not None:
+            self._arm.request_stop()
+
+    def clear_stop(self) -> None:
+        if self._arm is not None:
+            self._arm.clear_stop()
+
     def shutdown(self) -> None:
         with self._lock:
             if self._arm is not None:

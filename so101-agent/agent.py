@@ -12,10 +12,12 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import threading
 
 import anthropic
 
-from server import INSTRUCTIONS, cfg, mcp, skills
+import server
+from server import INSTRUCTIONS, cfg, mcp
 
 VOICE_NOTE = "\nReplies are short and conversational, one or two sentences, because they may be read aloud."
 
@@ -30,14 +32,42 @@ def _to_blocks(result) -> list[dict]:
     return blocks or [{"type": "text", "text": "(no output)"}]
 
 
+STOPPED = "Stopped."
+
+
 class ArmAgent:
-    def __init__(self, model: str | None = None, keep_images: int | None = None, client=None, on_event=None):
+    def __init__(self, model: str | None = None, keep_images: int | None = None, client=None, on_event=None,
+                 extra_system: str = ""):
         self.client = client or anthropic.AsyncAnthropic()
         self.model = model or cfg.agent.model
         self.keep_images = cfg.agent.keep_images if keep_images is None else keep_images
         self.messages: list[dict] = []
         self.on_event = on_event or (lambda msg: print(msg, file=sys.stderr))
+        self.system = INSTRUCTIONS + VOICE_NOTE + (("\n" + extra_system) if extra_system else "")
         self._tools = None
+        self._cancel = threading.Event()
+
+    def cancel(self) -> None:
+        """Stop the current request: the arm freezes right away and no further steps run.
+        Safe to call from another thread (e.g. the voice loop hearing "stop")."""
+        self._cancel.set()
+        server.skills.request_stop()
+
+    @property
+    def cancelled(self) -> bool:
+        return self._cancel.is_set()
+
+    def _finish_cancelled(self, calls, results: list[dict]) -> str:
+        """Close out the turn so the conversation stays valid for the next request."""
+        done = {r["tool_use_id"] for r in results}
+        for call in calls:
+            if call.id not in done:
+                results.append({"type": "tool_result", "tool_use_id": call.id, "is_error": True,
+                                "content": [{"type": "text", "text": "Cancelled: the user said stop."}]})
+        if results:
+            self.messages.append({"role": "user", "content": results})
+        self.messages.append({"role": "assistant", "content": "I stopped, as you asked."})
+        return STOPPED
 
     async def tools(self) -> list[dict]:
         if self._tools is None:
@@ -63,22 +93,28 @@ class ArmAgent:
                             part["content"][i] = {"type": "text", "text": "[older camera image removed]"}
 
     async def ask(self, text: str, max_steps: int = 25) -> str:
+        self._cancel.clear()
+        server.skills.clear_stop()
         self.messages.append({"role": "user", "content": text})
         tools = await self.tools()
         for _ in range(max_steps):
             resp = await self.client.messages.create(
                 model=self.model,
                 max_tokens=cfg.agent.max_tokens,
-                system=INSTRUCTIONS + VOICE_NOTE,
+                system=self.system,
                 tools=tools,
                 messages=self.messages,
             )
             self.messages.append({"role": "assistant", "content": resp.content})
             calls = [b for b in resp.content if b.type == "tool_use"]
+            if self.cancelled:
+                return self._finish_cancelled(calls, [])
             if resp.stop_reason != "tool_use" or not calls:
                 return "".join(b.text for b in resp.content if b.type == "text").strip()
             results = []
             for call in calls:
+                if self.cancelled:
+                    return self._finish_cancelled(calls, results)
                 self.on_event(f"  → {call.name}({json.dumps(call.input)})")
                 try:
                     r = await mcp.call_tool(call.name, call.input)
@@ -88,6 +124,8 @@ class ArmAgent:
                 if content and content[0].get("type") == "text":
                     self.on_event("    " + content[0]["text"][:160])
                 results.append({"type": "tool_result", "tool_use_id": call.id, "content": content, "is_error": is_error})
+            if self.cancelled:
+                return self._finish_cancelled(calls, results)
             self.messages.append({"role": "user", "content": results})
             self._prune_images()
         return "I stopped because that took too many steps. Tell me how you'd like to continue."
@@ -105,7 +143,7 @@ async def main() -> None:
             if text:
                 print("arm>", await agent.ask(text))
     finally:
-        skills.shutdown()
+        server.skills.shutdown()
 
 
 if __name__ == "__main__":

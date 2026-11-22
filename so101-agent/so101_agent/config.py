@@ -69,6 +69,22 @@ class AgentCfg:
 
 
 @dataclass
+class VoiceCfg:
+    input_device: str = "auto"  # "auto" finds the XVF3800, else part of a device name, "" = system default
+    input_channel: int = 1  # XVF3800 USB firmware: 0 = conference mix, 1 = speech-recognition beam
+    output_device: str = "auto"  # play replies on the XVF3800 so its echo cancellation can hear them
+    wake_word: str = "hey_jarvis"  # an openWakeWord model name, or a path to your own .onnx
+    wake_threshold: float = 0.5
+    stt_model: str = "small.en"  # faster-whisper model: tiny.en, base.en, small.en, medium.en
+    tts: str = "auto"  # auto (macOS `say`), say, none (print only)
+    say_voice: str | None = None  # a `say -v` voice name, e.g. "Samantha"
+    end_silence_s: float = 0.8  # this much quiet ends a command
+    max_command_s: float = 12.0
+    followup_s: float = 6.0  # after Claude asks a question, listen this long without the wake word
+    chimes: bool = True
+
+
+@dataclass
 class Config:
     robot: RobotCfg = field(default_factory=RobotCfg)
     camera: CameraCfg = field(default_factory=CameraCfg)
@@ -76,6 +92,7 @@ class Config:
     safety: SafetyCfg = field(default_factory=SafetyCfg)
     pointing: PointingCfg = field(default_factory=PointingCfg)
     agent: AgentCfg = field(default_factory=AgentCfg)
+    voice: VoiceCfg = field(default_factory=VoiceCfg)
     calibration_file: str = "calibration.json"
     base_dir: Path = field(default=PROJECT_DIR, repr=False)
 
