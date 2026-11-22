@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import math
+import threading
 import time
 from pathlib import Path
 
@@ -25,6 +26,10 @@ GRIPPER_SPEED = 120.0  # gripper units (0-100 scale) per second
 
 class ArmError(RuntimeError):
     pass
+
+
+class ArmStopped(ArmError):
+    """Raised when a move is cut short by request_stop() (e.g. someone said "stop")."""
 
 
 class LeRobotBackend:
@@ -110,6 +115,7 @@ class Arm:
         self.table_z: float | None = None
         self.gripper_closed = 0.0
         self.gripper_open = 100.0
+        self.stop_event = threading.Event()  # set from any thread to freeze the arm mid-move
 
     # ---------------------------------------------------------------- state
     def apply_calibration(self, calib: dict) -> None:
@@ -145,6 +151,23 @@ class Arm:
 
     _gripper_cmd_closed = False
 
+    # ---------------------------------------------------------- stopping
+    def request_stop(self) -> None:
+        """Freeze the arm where it is. Safe to call from any thread; moves keep failing
+        with ArmStopped until clear_stop() is called."""
+        self.stop_event.set()
+
+    def clear_stop(self) -> None:
+        self.stop_event.clear()
+
+    def _halt_if_stopped(self) -> None:
+        if self.stop_event.is_set():
+            try:
+                self.backend.write(self.backend.read())  # hold the current position
+            except Exception:
+                log.exception("couldn't send a hold command")
+            raise ArmStopped("stopped because the user said stop; the arm is holding still where it is")
+
     # ---------------------------------------------------------- low level
     def _ensure_torque(self) -> None:
         if not self.torque_on:
@@ -155,6 +178,7 @@ class Arm:
 
     def _stream(self, waypoints: list[np.ndarray], speed_scale: float = 1.0) -> None:
         """Send joint-space waypoints (6 values each, gripper last) at limited speed."""
+        self._halt_if_stopped()
         self._ensure_torque()
         hz = self.cfg.motion.control_hz
         speed = self.cfg.motion.max_joint_speed_deg_s * max(0.05, min(speed_scale, 1.0))
@@ -166,6 +190,7 @@ class Arm:
             t = max(np.max(np.abs(delta[:5])) / speed, abs(delta[5]) / GRIPPER_SPEED)
             steps = max(1, math.ceil(t * hz))
             for i in range(1, steps + 1):
+                self._halt_if_stopped()
                 p = current + delta * (i / steps)
                 self.backend.write(dict(zip(MOTORS, p)))
                 time.sleep(1.0 / hz)
@@ -313,6 +338,7 @@ class Arm:
         """Park in the rest pose with the motors off, then disconnect. If this gets cut
         short, the motors stay on and hold the arm where it is instead of dropping it."""
         try:
+            self.clear_stop()
             if self.torque_on:
                 self.rest()
         except Exception:

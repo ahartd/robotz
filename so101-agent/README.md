@@ -5,9 +5,10 @@ pre-built moves: `look`, `pick`, `place`, `move_to`, `nudge`, `gripper`, `home`,
 After each action it checks the result and adjusts, so you can say "put the red block on the
 blue one" and it works out the steps.
 
-Two ways to talk to it, sharing the same tools:
+Three ways to talk to it, sharing the same tools:
 - **Claude desktop app:** through the MCP server (`server.py`).
-- **Terminal:** `agent.py` (needs an Anthropic API key). This is also where voice will plug in later.
+- **Terminal:** `agent.py` (needs an Anthropic API key).
+- **Voice:** `voice.py` with the ReSpeaker XVF3800 mic array (same key).
 
 ## What you need
 
@@ -15,6 +16,7 @@ Two ways to talk to it, sharing the same tools:
 - A USB camera fixed above the table, looking down at the area in front of the arm. It must not
   move: if it gets bumped, recalibrate (takes about 2 minutes).
 - A printer, for `markers.pdf`.
+- For voice (optional): the ReSpeaker XVF3800 mic array and a powered speaker for its headphone jack.
 
 ## 1. Install
 
@@ -23,7 +25,7 @@ Use the Python environment where LeRobot already runs your arm:
 ```bash
 cd so101-agent
 pip install -r requirements.txt
-python -m pytest tests -q      # simulated arm and camera, no hardware: "13 passed"
+python -m pytest tests -q      # simulated arm and camera, no hardware: "22 passed"
 ```
 
 ## 2. Configure
@@ -105,6 +107,52 @@ Add the server to the app's local MCP server config, `claude_desktop_config.json
 The server reads `GEMINI_API_KEY` from `.env` itself. Restart the app, then try "Look at the
 table and pick up the red block."
 
+## 7. Talk to it (voice, XVF3800)
+
+```bash
+python voice.py
+```
+
+Say **"hey jarvis"**, wait for the chime, then say your command, e.g. "pick up the red block and
+put it in the cup". Claude answers out loud. If it asks you a question, just answer: you don't
+need the wake word for about 6 seconds after a question.
+
+**To stop the arm, say "hey jarvis" while it's moving.** It freezes on the spot, drops the
+request and asks what to do next. Your power plug is still the hard stop.
+
+Everything except Claude runs on your Mac: wake word (openWakeWord), speech-to-text
+(faster-whisper) and the spoken replies (macOS `say`). The first run downloads the speech models
+(about 500 MB for `small.en`).
+
+### Setting up the XVF3800
+
+1. **USB firmware.** It needs the USB firmware, either the 2-channel or 6-channel version. The
+   version with a XIAO ESP32S3 attached ships with I2S firmware and won't show up as a USB mic
+   until you flash the USB firmware.
+2. **A powered speaker in its 3.5 mm jack.** Replies play through the XVF3800 so its echo
+   cancellation can remove the robot's own voice. That's what lets you interrupt while it talks.
+3. **Check your Mac sees it:** `python voice.py --list-devices` should list a reSpeaker/XVF3800
+   input and output. `voice.py` finds it automatically and records the speech-recognition channel.
+4. **Allow microphone access.** macOS asks the first time your terminal app uses the mic. Allow it.
+
+`python voice.py --type` lets you type commands but hear spoken replies, which is handy for
+checking the speaker.
+
+### Voice settings (optional)
+
+Add any of these to `config.yaml` to change the defaults:
+
+```yaml
+voice:
+  wake_word: hey_jarvis    # other built-ins: alexa, hey_mycroft, hey_rhasspy, or a path to your own .onnx
+  wake_threshold: 0.5      # raise it if it wakes up by itself, lower it if it misses you
+  stt_model: small.en      # base.en is about 3x faster, medium.en is more accurate
+  say_voice: Samantha      # any voice from `say -v '?'`
+  followup_s: 6            # 0 = always need the wake word
+  input_device: auto       # auto = the XVF3800, or part of a device name
+  output_device: auto
+```
+
 ## How it works
 
 - **Seeing:** `look()` returns the camera image with a labeled pixel grid, the reachable area
@@ -124,6 +172,7 @@ table and pick up the red block."
   gripper tip is never sent lower than 5 mm above the table.
 - The arm can't feel anything. It won't notice a hand in the way. Keep its power plug within reach:
   unplugging it stops the arm immediately.
+- With `voice.py`, saying the wake word while the arm moves freezes it on the spot.
 - **Start with the arm in its rest pose.** LeRobot briefly turns the motors off while it connects.
 - When you're done, say "rest" (or call `rest()`): the arm goes back to its rest pose and the motors
   turn off. Quitting the agent or the app does the same.
@@ -144,26 +193,13 @@ table and pick up the red block."
 Set `camera.wrist_index` and Claude can use `look(camera="wrist")` for close-up checks. If you
 swap the wrist-roll part to mount it, rerun `lerobot-calibrate` and then `calibrate.py`.
 
-## Later: voice (XVF3800)
-
-`agent.py` already exposes the one call voice needs: `await ArmAgent().ask(text)` returns the
-reply text. A voice loop wraps that:
-
-1. The XVF3800 in USB mode is a plug-and-play mic and speaker output.
-2. Wake word (e.g. openWakeWord).
-3. Record until silence.
-4. Speech-to-text (e.g. faster-whisper).
-5. `ask(text)`.
-6. Text-to-speech out the XVF3800's headphone jack.
-
-The XVF3800's echo cancellation lets it hear you while the robot talks.
-
 ## Files
 
 | File | What it is |
 |---|---|
 | `server.py` | MCP server and tool definitions (used by the Claude app and `agent.py`) |
-| `agent.py` | Terminal agent; `ArmAgent.ask()` is the voice hook |
+| `agent.py` | Terminal agent; `ArmAgent.ask()` / `cancel()` are what voice uses |
+| `voice.py` | Voice front end for the XVF3800 |
 | `calibrate.py` | Camera-to-arm calibration, `--verify`, `--preview` |
 | `make_markers.py` / `markers.pdf` | Printable markers |
 | `so101_agent/` | Arm control, kinematics, vision, skills |
