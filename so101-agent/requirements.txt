@@ -1,0 +1,10 @@
+# Install into the same Python environment where LeRobot already runs your arm.
+lerobot[feetech,kinematics]>=0.7   # kinematics brings placo
+mcp>=2.3,<3
+anthropic
+opencv-python>=4.7
+pyyaml
+pillow
+pytest
+# Optional, for locate():
+google-genai

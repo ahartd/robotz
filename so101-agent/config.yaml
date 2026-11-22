@@ -1,0 +1,34 @@
+# SO-101 agent settings. Anything you leave out keeps its default (see so101_agent/config.py).
+
+robot:
+  port: /dev/tty.usbmodemXXXXXXXX   # follower arm port, from `lerobot-find-port` (Linux: /dev/ttyACM0)
+  id: my_follower_arm               # the --robot.id you used with lerobot-calibrate
+  # calibration_dir: ~/somewhere    # only if you saved LeRobot's calibration somewhere non-standard
+
+camera:
+  index: 0            # overhead camera, from `lerobot-find-cameras opencv`
+  width: 640
+  height: 480
+  rotate_180: false
+  # wrist_index: 1    # add once the wrist camera is mounted; enables look(camera="wrist")
+
+motion:
+  max_joint_speed_deg_s: 60   # lower this for a gentler arm
+  hover_height_m: 0.05        # travel height between picks
+  grasp_height_m: 0.012       # where the jaws close for a pick
+  place_height_m: 0.02
+  open_fraction: 0.7
+  home_joints_deg: [0, -90, 60, 90, 0]   # folded up near the base, out of the camera's way
+
+safety:
+  min_radius_m: 0.08          # measured from the shoulder (the axis the arm turns around)
+  max_radius_m: 0.28
+  max_abs_angle_deg: 80
+  min_height_m: 0.005
+  max_height_m: 0.12
+
+pointing:
+  gemini_model: gemini-robotics-er-1.5-preview   # used by locate() if GEMINI_API_KEY is set
+
+agent:
+  model: claude-sonnet-5-5

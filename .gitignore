@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+.env
+# per-setup files written by so101-agent/calibrate.py
+so101-agent/calibration.json
+so101-agent/camera_preview.jpg
