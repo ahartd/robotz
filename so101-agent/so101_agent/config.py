@@ -57,7 +57,7 @@ class SafetyCfg:
 
 @dataclass
 class PointingCfg:
-    gemini_model: str = "gemini-robotics-er-1.5-preview"
+    gemini_model: str = "gemini-robotics-er-2-preview"
     gemini_api_key_env: str = "GEMINI_API_KEY"
 
 
@@ -102,9 +102,36 @@ def _merge(obj: Any, data: dict, where: str) -> None:
             setattr(obj, key, value)
 
 
+def load_env_file(path: str | Path) -> None:
+    """Put KEY=value lines from a .env file into the environment.
+
+    Variables that are already set (e.g. exported in your shell) win over the file.
+    Blank values are skipped, so an untouched `GEMINI_API_KEY=` line changes nothing.
+    """
+    path = Path(path).expanduser()
+    if not path.is_file():
+        return
+    for raw in path.read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].lstrip()
+        key, _, value = line.partition("=")
+        key, value = key.strip(), value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        elif " #" in value:
+            value = value.split(" #", 1)[0].rstrip()
+        if key and value and key not in os.environ:
+            os.environ[key] = value
+
+
 def load_config(path: str | Path | None = None) -> Config:
-    """Load config.yaml (or $SO101_AGENT_CONFIG). Missing keys keep their defaults."""
+    """Load config.yaml (or $SO101_AGENT_CONFIG), plus API keys from the .env file next to it.
+    Missing settings keep their defaults."""
     path = Path(path or os.environ.get("SO101_AGENT_CONFIG") or PROJECT_DIR / "config.yaml").expanduser()
+    load_env_file(path.parent / ".env")
     cfg = Config(base_dir=path.parent.resolve())
     if path.exists():
         with open(path) as f:

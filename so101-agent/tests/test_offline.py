@@ -288,3 +288,32 @@ def test_going_home_from_anywhere_stays_above_table(calibrated):
             backend.history.clear()
             arm.home()
             assert tip_heights(arm, backend.history).min() > TABLE_Z + 0.008
+
+
+def test_env_file_loading(tmp_path, monkeypatch):
+    from so101_agent.config import load_config
+
+    for k in ("SO101_A", "SO101_B", "SO101_C", "SO101_D", "SO101_E", "SO101_SHELL"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("SO101_SHELL", "from-shell")
+    (tmp_path / ".env").write_text(
+        "# comment\n"
+        "SO101_A=plain\n"
+        'SO101_B="quoted # not a comment"\n'
+        "export SO101_C=exported  # trailing comment\n"
+        "SO101_D=\n"
+        "SO101_SHELL=from-file\n"
+        "not a setting\n"
+    )
+    (tmp_path / "config.yaml").write_text("robot:\n  mock: true\n")
+    cfg = load_config(tmp_path / "config.yaml")
+    import os
+
+    assert cfg.robot.mock is True
+    assert os.environ["SO101_A"] == "plain"
+    assert os.environ["SO101_B"] == "quoted # not a comment"
+    assert os.environ["SO101_C"] == "exported"
+    assert "SO101_D" not in os.environ  # blank values are skipped
+    assert os.environ["SO101_SHELL"] == "from-shell"  # the shell wins
+    for k in ("SO101_A", "SO101_B", "SO101_C"):
+        monkeypatch.delenv(k)
